@@ -11,6 +11,7 @@ import time
 
 # Global Tray Instance for balloon notifications
 global_tray_instance = None
+WM_USER = 0x0400
 WM_TRAYICON = WM_USER + 20
 WM_COMMAND = 0x0111
 WM_LBUTTONUP = 0x0202
@@ -78,7 +79,8 @@ user32 = ctypes.windll.user32
 shell32 = ctypes.windll.shell32
 kernel32 = ctypes.windll.kernel32
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+LRESULT = ctypes.c_ssize_t
+WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
 class WNDCLASSW(ctypes.Structure):
     _fields_ = [
@@ -93,6 +95,56 @@ class WNDCLASSW(ctypes.Structure):
         ("lpszMenuName", wintypes.LPCWSTR),
         ("lpszClassName", wintypes.LPCWSTR)
     ]
+
+# Explicit 64-bit / 32-bit Win32 prototypes
+user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.DefWindowProcW.restype = LRESULT
+
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostMessageW.restype = wintypes.BOOL
+
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.PostQuitMessage.restype = None
+
+user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+user32.RegisterClassW.restype = wintypes.ATOM
+
+user32.CreateWindowExW.argtypes = [
+    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID
+]
+user32.CreateWindowExW.restype = wintypes.HWND
+
+user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.LoadImageW.restype = wintypes.HANDLE
+
+user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
+user32.LoadIconW.restype = wintypes.HICON
+
+shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+user32.CreatePopupMenu.argtypes = []
+user32.CreatePopupMenu.restype = wintypes.HMENU
+
+user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+user32.AppendMenuW.restype = wintypes.BOOL
+
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.GetCursorPos.restype = wintypes.BOOL
+
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.SetForegroundWindow.restype = wintypes.BOOL
+
+user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, ctypes.c_void_p]
+user32.TrackPopupMenu.restype = wintypes.BOOL
+
+user32.DestroyMenu.argtypes = [wintypes.HMENU]
+user32.DestroyMenu.restype = wintypes.BOOL
 
 class WindowsTrayIcon:
     def __init__(self, icon_path, tooltip="AMEVA-Crawler", on_show=None, on_run_all=None, on_exit=None):
@@ -119,8 +171,14 @@ class WindowsTrayIcon:
         """Remove tray icon and destroy hidden window."""
         self._running = False
         if self.hwnd and self._nid:
-            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
-            user32.PostMessageW(self.hwnd, WM_DESTROY, 0, 0)
+            try:
+                shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
+            except Exception:
+                pass
+            try:
+                user32.PostMessageW(self.hwnd, WM_DESTROY, 0, 0)
+            except Exception:
+                pass
 
     def show_balloon(self, title, message, is_warning=False):
         """Display Windows system tray balloon notification."""
@@ -137,7 +195,10 @@ class WindowsTrayIcon:
         nid.dwInfoFlags = NIIF_WARNING if is_warning else NIIF_INFO
         nid.uTimeoutOrVersion = 10000
 
-        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+        try:
+            shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+        except Exception:
+            pass
 
     def _run_tray_thread(self):
         hinstance = kernel32.GetModuleHandleW(None)
@@ -205,26 +266,29 @@ class WindowsTrayIcon:
         user32.DestroyMenu(hmenu)
 
     def _wnd_proc_callback(self, hwnd, msg, wparam, lparam):
-        if msg == WM_TRAYICON:
-            if lparam in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
-                if self.on_show:
+        try:
+            if msg == WM_TRAYICON:
+                if lparam in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
+                    if self.on_show:
+                        self.on_show()
+                elif lparam == WM_RBUTTONUP:
+                    self._show_menu()
+                return 0
+
+            elif msg == WM_COMMAND:
+                cmd = wparam & 0xFFFF
+                if cmd == IDM_SHOW and self.on_show:
                     self.on_show()
-            elif lparam == WM_RBUTTONUP:
-                self._show_menu()
-            return 0
+                elif cmd == IDM_RUN_ALL and self.on_run_all:
+                    self.on_run_all()
+                elif cmd == IDM_EXIT and self.on_exit:
+                    self.on_exit()
+                return 0
 
-        elif msg == WM_COMMAND:
-            cmd = wparam & 0xFFFF
-            if cmd == IDM_SHOW and self.on_show:
-                self.on_show()
-            elif cmd == IDM_RUN_ALL and self.on_run_all:
-                self.on_run_all()
-            elif cmd == IDM_EXIT and self.on_exit:
-                self.on_exit()
-            return 0
+            elif msg == WM_DESTROY:
+                user32.PostQuitMessage(0)
+                return 0
 
-        elif msg == WM_DESTROY:
-            user32.PostQuitMessage(0)
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        except Exception:
             return 0
-
-        return user32.DefWindowProcW(hwnd, msg, wparam, lparam)

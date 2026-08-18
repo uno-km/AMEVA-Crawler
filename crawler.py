@@ -283,6 +283,77 @@ def analyze_diff(old_text, new_text, old_links, new_links):
     }
 
 
+def parse_content_and_links(raw_content, base_url=""):
+    """
+    Intelligently parse raw HTTP response content (JSON or HTML).
+    Returns: (extracted_text, extracted_links)
+    """
+    raw_str = (raw_content or "").strip()
+    
+    # 1. Try JSON parsing
+    if raw_str.startswith(('{', '[')):
+        try:
+            data = json.loads(raw_str)
+            text_lines = []
+            links = []
+            
+            items = []
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                if 'list' in data and isinstance(data['list'], list):
+                    items = data['list']
+                elif 'data' in data and isinstance(data['data'], list):
+                    items = data['data']
+                elif 'items' in data and isinstance(data['items'], list):
+                    items = data['items']
+                elif 'results' in data and isinstance(data['results'], list):
+                    items = data['results']
+                    
+            if items:
+                for it in items:
+                    if isinstance(it, dict):
+                        title = it.get('jobnoticeName') or it.get('title') or it.get('name') or it.get('subject') or ''
+                        sn = it.get('jobnoticeSn') or it.get('id') or it.get('sn')
+                        href = it.get('url') or it.get('href') or it.get('link')
+                        if not href and sn and 'recruiter.co.kr' in base_url:
+                            href = urllib.parse.urljoin(base_url, f'/app/jobnotice/view?jobnoticeSn={sn}')
+                        elif href:
+                            href = urllib.parse.urljoin(base_url, str(href))
+                            
+                        line_parts = []
+                        if title:
+                            line_parts.append(str(title))
+                        for k in ['recruitClassName', 'recruitTypeName', 'receiptState', 'category', 'status', 'dept', 'location']:
+                            if it.get(k):
+                                line_parts.append(f'[{it.get(k)}]')
+                        if line_parts:
+                            text_lines.append(' '.join(line_parts))
+                        if title and href:
+                            links.append({'text': str(title), 'href': str(href)})
+                            
+            if not text_lines:
+                text_lines.append(json.dumps(data, ensure_ascii=False, indent=2))
+                
+            return '\n'.join(text_lines), links
+        except Exception:
+            pass
+
+    # 2. HTML parsing via SmartHTMLParser
+    parser = SmartHTMLParser(base_url=base_url)
+    try:
+        parser.feed(raw_content)
+        extracted_text = parser.get_clean_text()
+        extracted_links = parser.get_links()
+    except Exception as e:
+        extracted_text = re.sub(r'<[^>]+>', ' ', raw_content)
+        extracted_lines = [l.strip() for l in extracted_text.splitlines() if l.strip()]
+        extracted_text = '\n'.join(extracted_lines)
+        extracted_links = []
+        
+    return extracted_text, extracted_links
+
+
 def execute_crawl(target_id):
     """
     Execute crawling on a specific target ID, process changes, and trigger notification if changed.
@@ -316,16 +387,8 @@ def execute_crawl(target_id):
 
     raw_html = resp["content"]
     
-    # 2. Parse HTML & extract text & links
-    parser = SmartHTMLParser(base_url=target["url"])
-    try:
-        parser.feed(raw_html)
-        extracted_text = parser.get_clean_text()
-        extracted_links = parser.get_links()
-    except Exception as e:
-        db.log_system("WARN", f"HTML Parsing warning for {target['name']}: {e}")
-        extracted_text = re.sub(r'<[^>]+>', ' ', raw_html)
-        extracted_links = []
+    # 2. Intelligently parse content (JSON API or HTML) & extract text & links
+    extracted_text, extracted_links = parse_content_and_links(raw_html, base_url=target["url"])
 
     # Filter rule if specified (Regex or Keyword)
     rule = target.get("selector_rule", "").strip()

@@ -1,5 +1,5 @@
 """
-Script to create Desktop shortcut and launcher with custom AMEVA Brand Icon.
+Script to create Desktop shortcut with official AMEVA Brand Icon.
 """
 import os
 import subprocess
@@ -9,16 +9,15 @@ APP_PY = os.path.join(BASE_DIR, "app.py")
 ICON_ICO = os.path.join(BASE_DIR, "assets", "icon.ico")
 DESKTOP_DIR = os.path.join(os.environ["USERPROFILE"], "Desktop")
 
-# 1. Find pythonw / pyw or python for silent background start
+# 1. Prioritize Python 3.12 pythonw.exe or pyw.exe for silent background start
 pythonw_path = ""
 for candidate in [
-    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Launcher", "pyw.exe"),
     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Python312", "pythonw.exe"),
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Launcher", "pyw.exe"),
     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Python311", "pythonw.exe"),
     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python", "Python310", "pythonw.exe"),
     "pythonw.exe",
     "pyw.exe",
-    "py.exe"
 ]:
     if os.path.exists(candidate):
         pythonw_path = candidate
@@ -36,7 +35,7 @@ $Shortcut.TargetPath = "{pythonw_path}"
 $Shortcut.Arguments = '"{APP_PY}"'
 $Shortcut.WorkingDirectory = "{BASE_DIR}"
 $Shortcut.IconLocation = "{ICON_ICO}, 0"
-$Shortcut.Description = "AMEVA-Crawler (Autonomous Web Monitor)"
+$Shortcut.Description = "AMEVA-Crawler (실시간 웹 변경 모니터링)"
 $Shortcut.Save()
 """
 
@@ -46,23 +45,11 @@ try:
 except Exception as e:
     print(f"[-] Failed to create shortcut via PowerShell: {e}")
 
-# 3. Also create Desktop AMEVA-Crawler.bat for convenience
+# 3. Clean up unwanted redundant .bat file from Desktop if present
 desktop_bat_path = os.path.join(DESKTOP_DIR, "AMEVA-Crawler.bat")
-bat_content = f"""@echo off
-cd /d "{BASE_DIR}"
-where pyw >nul 2>&1
-if %ERRORLEVEL% equ 0 (
-    start "" pyw app.py
-) else (
-    where py >nul 2>&1
-    if %ERRORLEVEL% equ 0 (
-        start "" py -3 app.py
-    ) else (
-        start "" python app.py
-    )
-)
-"""
-with open(desktop_bat_path, "w", encoding="utf-8") as f:
-    f.write(bat_content)
-
-print(f"[+] Created Desktop Launcher Bat: {desktop_bat_path}")
+if os.path.exists(desktop_bat_path):
+    try:
+        os.remove(desktop_bat_path)
+        print(f"[+] Removed redundant Desktop bat: {desktop_bat_path}")
+    except Exception as e:
+        print(f"[-] Could not remove {desktop_bat_path}: {e}")
