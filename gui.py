@@ -1,23 +1,33 @@
 """
 AMEVA-Crawler GUI Module
-Pure Python standard library GUI built with tkinter and ttk.
+Pure Python standard library GUI built with tkinter and ttk with System Tray integration.
 """
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
-import datetime
-import threading
+import os
 import db
 import crawler
 import telegram_bot
 from scheduler import scheduler_instance
+from config import BASE_DIR
+
+ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.ico")
 
 class AMEVACrawlerGUI:
-    def __init__(self, root):
+    def __init__(self, root, tray=None):
         self.root = root
-        self.root.title("AMEVA-Crawler (Python Standard GUI)")
-        self.root.geometry("1100x700")
-        self.root.minsize(900, 550)
+        self.tray = tray
+        self.root.title("AMEVA-Crawler (Autonomous Web Monitor)")
+        self.root.geometry("1120x720")
+        self.root.minsize(920, 560)
+
+        # Set Window Icon
+        if os.path.exists(ICON_PATH):
+            try:
+                self.root.iconbitmap(ICON_PATH)
+            except Exception:
+                pass
 
         # Style configuration
         self.style = ttk.Style()
@@ -50,6 +60,7 @@ class AMEVACrawlerGUI:
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
 
         ttk.Button(toolbar, text="⚙️ 텔레그램 설정", command=self._open_telegram_dialog).pack(side=tk.LEFT, padx=3)
+        ttk.Button(toolbar, text="🔽 트레이로 최소화", command=self.minimize_to_tray).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="🔄 새로고침", command=self._load_targets).pack(side=tk.RIGHT, padx=3)
 
         # 2. Main Paned Window (Split Target Table & Logs)
@@ -78,7 +89,7 @@ class AMEVACrawlerGUI:
         self.tree.column("active", width=65, anchor=tk.CENTER)
         self.tree.column("name", width=160)
         self.tree.column("method", width=60, anchor=tk.CENTER)
-        self.tree.column("url", width=320)
+        self.tree.column("url", width=330)
         self.tree.column("interval", width=120)
         self.tree.column("last_checked", width=130, anchor=tk.CENTER)
         self.tree.column("status", width=70, anchor=tk.CENTER)
@@ -101,7 +112,7 @@ class AMEVACrawlerGUI:
         log_frame = ttk.LabelFrame(paned, text="실시간 시스템 & 크롤링 로그", padding=6)
         paned.add(log_frame, weight=2)
 
-        self.log_text = tk.Text(log_frame, wrap=tk.WORD, font=("Consolas", 9), height=8, bg="#1e1e1e", fg="#d4d4d4")
+        self.log_text = tk.Text(log_frame, wrap=tk.WORD, font=("Consolas", 9), height=8, bg="#111726", fg="#e2e8f0")
         log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=log_scroll.set)
 
@@ -115,6 +126,18 @@ class AMEVACrawlerGUI:
         self.status_label = ttk.Label(self.status_bar, text="준비 완료", font=("Segoe UI", 9))
         self.status_label.pack(side=tk.LEFT)
 
+    def minimize_to_tray(self):
+        """Hide window to system tray."""
+        self.root.withdraw()
+        if self.tray:
+            self.tray.show_balloon("AMEVA-Crawler", "백그라운드에서 모니터링이 계속 실행 중입니다.\n트레이 아이콘을 더블클릭하면 다시 열립니다.")
+
+    def show_window(self):
+        """Restore window from system tray."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
     def _periodic_timer(self):
         """Timer loop for updating UI."""
         self._load_targets(silent=True)
@@ -127,7 +150,6 @@ class AMEVACrawlerGUI:
         selected = self.tree.selection()
         selected_id = self.tree.item(selected[0])["values"][0] if selected else None
 
-        # Clear items
         for item in self.tree.get_children():
             self.tree.delete(item)
 
@@ -241,6 +263,12 @@ class TargetDialog(tk.Toplevel):
         self.minsize(550, 480)
         self.transient(parent)
         self.grab_set()
+
+        if os.path.exists(ICON_PATH):
+            try:
+                self.iconbitmap(ICON_PATH)
+            except Exception:
+                pass
 
         self._create_widgets()
         if target:
@@ -479,6 +507,12 @@ class HistoryDialog(tk.Toplevel):
         self.geometry("900x600")
         self.transient(parent)
 
+        if os.path.exists(ICON_PATH):
+            try:
+                self.iconbitmap(ICON_PATH)
+            except Exception:
+                pass
+
         self._create_widgets()
         self._load_history()
 
@@ -572,6 +606,12 @@ class TelegramSettingsDialog(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
 
+        if os.path.exists(ICON_PATH):
+            try:
+                self.iconbitmap(ICON_PATH)
+            except Exception:
+                pass
+
         self._create_widgets()
         self._load_settings()
 
@@ -619,7 +659,6 @@ class TelegramSettingsDialog(tk.Toplevel):
             messagebox.showwarning("입력 필요", "먼저 Bot Token을 입력해주세요.", parent=self)
             return
 
-        # Temporarily save token
         db.set_setting("telegram_bot_token", token)
         res = telegram_bot.fetch_bot_updates()
         if res.get("success"):

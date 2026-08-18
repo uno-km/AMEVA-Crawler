@@ -2,11 +2,16 @@
 title AMEVA-Crawler
 cd /d "%~dp0"
 echo ===================================================
-echo   Starting AMEVA-Crawler (Python Tkinter GUI)...
+echo   Starting AMEVA-Crawler with System Tray...
 echo ===================================================
-where py >nul 2>&1
+where pyw >nul 2>&1
 if %ERRORLEVEL% equ 0 (
-    py -3 app.py
+    start "" pyw app.py
 ) else (
-    python app.py
+    where py >nul 2>&1
+    if %ERRORLEVEL% equ 0 (
+        py -3 app.py
+    ) else (
+        python app.py
+    )
 )

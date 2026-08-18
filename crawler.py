@@ -395,11 +395,23 @@ def execute_crawl(target_id):
     
     db.update_target_crawl_status(target_id, resp["status_code"], content_hash, is_changed, has_error=False)
     
-    # 5. Send Telegram Notification if changed
+    # 5. Send Telegram Notification & Tray Balloon if changed
     if is_changed:
         db.log_system("INFO", f"🔔 [{target['name']}] 사이트 변경 감지! 텔레그램 알림 발송 준비")
         import telegram_bot
         telegram_bot.notify_target_changed(target, diff_result, resp)
+        
+        # System Tray Balloon Notification
+        try:
+            from tray import global_tray_instance
+            if global_tray_instance:
+                new_links_count = len(diff_result.get("new_links", []))
+                balloon_msg = f"[{target['name']}] 사이트 내용이 변경되었습니다!"
+                if new_links_count > 0:
+                    balloon_msg += f"\n신규 링크 {new_links_count}건 발견"
+                global_tray_instance.show_balloon("AMEVA-Crawler 변경 감지", balloon_msg)
+        except Exception:
+            pass
 
     return {
         "success": True,
