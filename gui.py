@@ -6,6 +6,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import json
 import os
+import threading
+import webbrowser
+import tempfile
+import urllib.parse
 import db
 import crawler
 import telegram_bot
@@ -54,6 +58,7 @@ class AMEVACrawlerGUI:
         ttk.Button(toolbar, text="🗑️ 타겟 삭제", command=self._delete_selected_target).pack(side=tk.LEFT, padx=3)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
 
+        ttk.Button(toolbar, text="🎯 HTTP 테스터 (Postman)", command=self._open_api_tester_dialog).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="▶ 즉시 실행", command=self._run_selected_target).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="⏯️ 활성/정지 토글", command=self._toggle_selected_target).pack(side=tk.LEFT, padx=3)
         ttk.Button(toolbar, text="📋 이력 & Diff 보기", command=self._open_history_dialog).pack(side=tk.LEFT, padx=3)
@@ -231,8 +236,11 @@ class AMEVACrawlerGUI:
                 db.delete_target(target_id)
                 self._load_targets()
 
-    def _open_add_target_dialog(self):
-        TargetDialog(self.root, on_saved=self._load_targets)
+    def _open_add_target_dialog(self, initial_data=None):
+        TargetDialog(self.root, target=initial_data, on_saved=self._load_targets)
+
+    def _open_api_tester_dialog(self, initial_data=None):
+        APITesterDialog(self.root, initial_data=initial_data, on_create_target=self._open_add_target_dialog)
 
     def _open_edit_target_dialog(self):
         target_id = self._get_selected_target_id()
@@ -289,7 +297,7 @@ class TargetDialog(tk.Toplevel):
         self.entry_name.pack(side=tk.LEFT, padx=6)
 
         ttk.Label(row1, text="Method:").pack(side=tk.LEFT, padx=(10, 0))
-        self.combo_method = ttk.Combobox(row1, values=["GET", "POST"], state="readonly", width=8)
+        self.combo_method = ttk.Combobox(row1, values=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"], state="readonly", width=8)
         self.combo_method.set("GET")
         self.combo_method.pack(side=tk.LEFT, padx=6)
         self.combo_method.bind("<<ComboboxSelected>>", self._on_method_changed)
@@ -301,8 +309,8 @@ class TargetDialog(tk.Toplevel):
         self.entry_url = ttk.Entry(row2)
         self.entry_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
 
-        # 3. POST Body Frame (Conditional)
-        self.post_frame = ttk.LabelFrame(main_frame, text="POST 요청 설정 (Body & Content-Type)", padding=6)
+        # 3. POST/PUT Body Frame (Conditional)
+        self.post_frame = ttk.LabelFrame(main_frame, text="요청 본문 설정 (Body & Content-Type)", padding=6)
         
         row_ct = ttk.Frame(self.post_frame)
         row_ct.pack(fill=tk.X, pady=2)
@@ -371,7 +379,7 @@ class TargetDialog(tk.Toplevel):
         ttk.Button(btn_frame, text="취소", command=self.destroy).pack(side=tk.RIGHT, padx=4)
 
     def _on_method_changed(self, event=None):
-        if self.combo_method.get() == "POST":
+        if self.combo_method.get() in ("POST", "PUT", "PATCH", "DELETE"):
             self.post_frame.pack(fill=tk.X, padx=10, pady=5)
         else:
             self.post_frame.pack_forget()
@@ -398,17 +406,24 @@ class TargetDialog(tk.Toplevel):
 
     def _populate_fields(self):
         t = self.target
+        self.entry_name.delete(0, tk.END)
         self.entry_name.insert(0, t.get("name", ""))
+        self.entry_url.delete(0, tk.END)
         self.entry_url.insert(0, t.get("url", ""))
-        self.combo_method.set(t.get("method", "GET"))
+        self.combo_method.set(t.get("method", "GET").upper())
         self._on_method_changed()
 
         if t.get("headers") and t.get("headers") != "{}":
-            self.text_headers.insert("1.0", t.get("headers"))
+            h = t.get("headers")
+            if isinstance(h, dict):
+                h = json.dumps(h, ensure_ascii=False, indent=2)
+            self.text_headers.delete("1.0", tk.END)
+            self.text_headers.insert("1.0", str(h))
 
-        if t.get("method") == "POST":
+        if t.get("method", "GET").upper() in ("POST", "PUT", "PATCH", "DELETE"):
             self.combo_content_type.set(t.get("content_type", "application/json"))
-            self.text_body.insert("1.0", t.get("body", ""))
+            self.text_body.delete("1.0", tk.END)
+            self.text_body.insert("1.0", str(t.get("body", "")))
 
         itype = t.get("interval_type", "interval")
         if itype == "interval":
@@ -432,6 +447,7 @@ class TargetDialog(tk.Toplevel):
         else:
             self.combo_detect_mode.set("전체 (신규 링크 + 본문 변경)")
 
+        self.entry_rule.delete(0, tk.END)
         self.entry_rule.insert(0, t.get("selector_rule", ""))
 
     def _save_target(self):
@@ -443,8 +459,8 @@ class TargetDialog(tk.Toplevel):
 
         method = self.combo_method.get()
         headers = self.text_headers.get("1.0", tk.END).strip() or "{}"
-        body = self.text_body.get("1.0", tk.END).strip() if method == "POST" else ""
-        content_type = self.combo_content_type.get() if method == "POST" else "application/json"
+        body = self.text_body.get("1.0", tk.END).strip() if method in ("POST", "PUT", "PATCH", "DELETE") else ""
+        content_type = self.combo_content_type.get() if method in ("POST", "PUT", "PATCH", "DELETE") else "application/json"
 
         itype_label = self.combo_interval_type.get()
         if "초 단위" in itype_label:
@@ -702,4 +718,632 @@ class TelegramSettingsDialog(tk.Toplevel):
         messagebox.showinfo("저장 완료", "텔레그램 설정이 안전하게 저장되었습니다.", parent=self)
         if self.on_saved:
             self.on_saved()
+        self.destroy()
+
+
+# -----------------------------------------------------------------------------
+# Postman-style HTTP / API Tester Dialog (찔러보기 & 실시간 렌더링)
+# -----------------------------------------------------------------------------
+class APITesterDialog(tk.Toplevel):
+    def __init__(self, parent, initial_data=None, on_create_target=None):
+        super().__init__(parent)
+        self.initial_data = initial_data or {}
+        self.on_create_target = on_create_target
+        self.title("AMEVA HTTP/API Tester (Postman 모드 / 찔러보기)")
+        self.geometry("1000x720")
+        self.minsize(840, 580)
+        self.transient(parent)
+
+        if os.path.exists(ICON_PATH):
+            try:
+                self.iconbitmap(ICON_PATH)
+            except Exception:
+                pass
+
+        self._is_loading = False
+        self._current_response = None
+        self._temp_html_path = None
+
+        self._create_widgets()
+        self._load_initial_data()
+
+    def _create_widgets(self):
+        main = ttk.Frame(self, padding=10)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        # 1. Top URL / Request Bar
+        req_bar = ttk.LabelFrame(main, text="🚀 HTTP 요청 전송 (Request Builder)", padding=8)
+        req_bar.pack(fill=tk.X, pady=(0, 6))
+
+        row_req = ttk.Frame(req_bar)
+        row_req.pack(fill=tk.X)
+
+        self.combo_method = ttk.Combobox(
+            row_req, 
+            values=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"], 
+            state="readonly", 
+            width=9, 
+            font=("Segoe UI", 10, "bold")
+        )
+        self.combo_method.set("GET")
+        self.combo_method.pack(side=tk.LEFT, padx=(0, 6))
+        self.combo_method.bind("<<ComboboxSelected>>", self._on_method_change)
+
+        self.entry_url = ttk.Entry(row_req, font=("Consolas", 10))
+        self.entry_url.insert(0, "https://")
+        self.entry_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.entry_url.bind("<Return>", lambda e: self._send_request())
+
+        self.btn_send = ttk.Button(row_req, text="⚡ 찔러보기 (Send)", command=self._send_request)
+        self.btn_send.pack(side=tk.LEFT, padx=4)
+
+        self.btn_schedule = ttk.Button(row_req, text="📌 모니터링 타겟으로 등록", command=self._create_schedule_target)
+        self.btn_schedule.pack(side=tk.LEFT, padx=4)
+
+        # 2. Main Paned Split (Upper: Request Config, Lower: Response Viewer)
+        paned = ttk.PanedWindow(main, orient=tk.VERTICAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        # --- Request Notebook ---
+        req_frame = ttk.Frame(paned)
+        paned.add(req_frame, weight=2)
+
+        self.req_notebook = ttk.Notebook(req_frame)
+        self.req_notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 1: Params
+        tab_params = ttk.Frame(self.req_notebook, padding=6)
+        self.req_notebook.add(tab_params, text="QueryParams (파라미터)")
+        self._build_params_tab(tab_params)
+
+        # Tab 2: Headers
+        tab_headers = ttk.Frame(self.req_notebook, padding=6)
+        self.req_notebook.add(tab_headers, text="Headers (헤더/쿠키)")
+        self._build_headers_tab(tab_headers)
+
+        # Tab 3: Body
+        tab_body = ttk.Frame(self.req_notebook, padding=6)
+        self.req_notebook.add(tab_body, text="Body (요청 본문)")
+        self._build_body_tab(tab_body)
+
+        # Tab 4: Auth
+        tab_auth = ttk.Frame(self.req_notebook, padding=6)
+        self.req_notebook.add(tab_auth, text="Auth (인증)")
+        self._build_auth_tab(tab_auth)
+
+        # --- Response Frame ---
+        resp_frame = ttk.Frame(paned)
+        paned.add(resp_frame, weight=3)
+
+        # Status Bar Header
+        resp_header = ttk.Frame(resp_frame, padding=(4, 4))
+        resp_header.pack(fill=tk.X)
+
+        ttk.Label(resp_header, text="응답 결과 (Response):", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        self.lbl_status = ttk.Label(resp_header, text="대기 중...", font=("Segoe UI", 9, "bold"), foreground="#6b7280")
+        self.lbl_status.pack(side=tk.LEFT, padx=10)
+
+        self.lbl_time = ttk.Label(resp_header, text="", font=("Segoe UI", 9))
+        self.lbl_time.pack(side=tk.LEFT, padx=6)
+
+        self.lbl_size = ttk.Label(resp_header, text="", font=("Segoe UI", 9))
+        self.lbl_size.pack(side=tk.LEFT, padx=6)
+
+        self.btn_copy_resp = ttk.Button(resp_header, text="📋 응답 복사", command=self._copy_response_body)
+        self.btn_copy_resp.pack(side=tk.RIGHT, padx=4)
+
+        # Response Notebook
+        self.resp_notebook = ttk.Notebook(resp_frame)
+        self.resp_notebook.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+
+        # Resp Tab 1: Pretty
+        tab_pretty = ttk.Frame(self.resp_notebook, padding=4)
+        self.resp_notebook.add(tab_pretty, text="✨ Pretty (포맷팅)")
+        self.text_pretty = tk.Text(tab_pretty, font=("Consolas", 9), wrap=tk.NONE)
+        scroll_py = ttk.Scrollbar(tab_pretty, orient=tk.VERTICAL, command=self.text_pretty.yview)
+        scroll_px = ttk.Scrollbar(tab_pretty, orient=tk.HORIZONTAL, command=self.text_pretty.xview)
+        self.text_pretty.configure(yscrollcommand=scroll_py.set, xscrollcommand=scroll_px.set)
+        scroll_py.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_px.pack(side=tk.BOTTOM, fill=tk.X)
+        self.text_pretty.pack(fill=tk.BOTH, expand=True)
+
+        # Resp Tab 2: Raw
+        tab_raw = ttk.Frame(self.resp_notebook, padding=4)
+        self.resp_notebook.add(tab_raw, text="📄 Raw (원문)")
+        self.text_raw = tk.Text(tab_raw, font=("Consolas", 9), wrap=tk.NONE)
+        scroll_ry = ttk.Scrollbar(tab_raw, orient=tk.VERTICAL, command=self.text_raw.yview)
+        scroll_rx = ttk.Scrollbar(tab_raw, orient=tk.HORIZONTAL, command=self.text_raw.xview)
+        self.text_raw.configure(yscrollcommand=scroll_ry.set, xscrollcommand=scroll_rx.set)
+        scroll_ry.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_rx.pack(side=tk.BOTTOM, fill=tk.X)
+        self.text_raw.pack(fill=tk.BOTH, expand=True)
+
+        # Resp Tab 3: HTML View / Preview
+        tab_html = ttk.Frame(self.resp_notebook, padding=4)
+        self.resp_notebook.add(tab_html, text="🌐 HTML 뷰 / 프리뷰")
+        
+        bar_html = ttk.Frame(tab_html)
+        bar_html.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(bar_html, text="🖥️ 기본 웹 브라우저로 실시간 렌더링 열기", command=self._open_in_system_browser).pack(side=tk.LEFT, padx=2)
+        ttk.Label(bar_html, text="(HTML 응답을 실제 브라우저 엔진으로 즉시 렌더링하여 확인합니다)", font=("Segoe UI", 8), foreground="#6b7280").pack(side=tk.LEFT, padx=6)
+
+        self.text_html_preview = tk.Text(tab_html, font=("Segoe UI", 9), wrap=tk.WORD)
+        scroll_hy = ttk.Scrollbar(tab_html, orient=tk.VERTICAL, command=self.text_html_preview.yview)
+        self.text_html_preview.configure(yscrollcommand=scroll_hy.set)
+        scroll_hy.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text_html_preview.pack(fill=tk.BOTH, expand=True)
+
+        # Resp Tab 4: Headers
+        tab_rheaders = ttk.Frame(self.resp_notebook, padding=4)
+        self.resp_notebook.add(tab_rheaders, text="📑 Headers (응답 헤더)")
+        self.tree_rheaders = ttk.Treeview(tab_rheaders, columns=("header", "value"), show="headings")
+        self.tree_rheaders.heading("header", text="헤더 이름 (Header)")
+        self.tree_rheaders.heading("value", text="헤더 값 (Value)")
+        self.tree_rheaders.column("header", width=220)
+        self.tree_rheaders.column("value", width=600)
+        scroll_rhy = ttk.Scrollbar(tab_rheaders, orient=tk.VERTICAL, command=self.tree_rheaders.yview)
+        self.tree_rheaders.configure(yscrollcommand=scroll_rhy.set)
+        scroll_rhy.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_rheaders.pack(fill=tk.BOTH, expand=True)
+
+        # Resp Tab 5: Links
+        tab_links = ttk.Frame(self.resp_notebook, padding=4)
+        self.resp_notebook.add(tab_links, text="🔗 추출된 링크 (Links)")
+        
+        bar_links = ttk.Frame(tab_links)
+        bar_links.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(bar_links, text="🔗 선택 링크 브라우저로 열기", command=self._open_selected_link).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar_links, text="📋 선택 링크 URL 복사", command=self._copy_selected_link).pack(side=tk.LEFT, padx=2)
+        
+        self.tree_links = ttk.Treeview(tab_links, columns=("text", "href"), show="headings")
+        self.tree_links.heading("text", text="링크 명칭 (Text / Title)")
+        self.tree_links.heading("href", text="대상 URL (HREF)")
+        self.tree_links.column("text", width=300)
+        self.tree_links.column("href", width=550)
+        scroll_ly = ttk.Scrollbar(tab_links, orient=tk.VERTICAL, command=self.tree_links.yview)
+        self.tree_links.configure(yscrollcommand=scroll_ly.set)
+        scroll_ly.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_links.pack(fill=tk.BOTH, expand=True)
+
+    # ----------------- Request Builders -----------------
+
+    def _build_params_tab(self, parent):
+        ttk.Label(parent, text="URL 쿼리 파라미터 (JSON 또는 key=value 라인별 입력):", font=("Segoe UI", 9)).pack(anchor=tk.W, pady=(0, 2))
+        self.text_params = tk.Text(parent, height=5, font=("Consolas", 9))
+        self.text_params.pack(fill=tk.BOTH, expand=True)
+        
+        bar = ttk.Frame(parent)
+        bar.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(bar, text="URL에서 파라미터 가져오기", command=self._sync_params_from_url).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="URL로 파라미터 적용", command=self._sync_params_to_url).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="지우기", command=lambda: self.text_params.delete("1.0", tk.END)).pack(side=tk.RIGHT, padx=2)
+
+    def _build_headers_tab(self, parent):
+        top_bar = ttk.Frame(parent)
+        top_bar.pack(fill=tk.X, pady=(0, 4))
+        
+        ttk.Label(top_bar, text="HTTP 요청 헤더 (JSON 형식):", font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        
+        ttk.Label(top_bar, text="프리셋 추가:").pack(side=tk.LEFT, padx=(16, 4))
+        self.combo_header_preset = ttk.Combobox(
+            top_bar, 
+            values=[
+                "JSON (application/json)",
+                "Form (x-www-form-urlencoded)",
+                "X-Requested-With (XMLHttpRequest)",
+                "Referer (현재 도메인)",
+                "User-Agent (Chrome 데스크톱)",
+                "Cookie (session_id=...)"
+            ],
+            state="readonly",
+            width=28
+        )
+        self.combo_header_preset.pack(side=tk.LEFT, padx=2)
+        ttk.Button(top_bar, text="➕ 추가", command=self._apply_header_preset).pack(side=tk.LEFT, padx=2)
+
+        self.text_req_headers = tk.Text(parent, height=5, font=("Consolas", 9))
+        self.text_req_headers.pack(fill=tk.BOTH, expand=True)
+        self.text_req_headers.insert("1.0", "{}")
+
+    def _build_body_tab(self, parent):
+        top_bar = ttk.Frame(parent)
+        top_bar.pack(fill=tk.X, pady=(0, 4))
+
+        ttk.Label(top_bar, text="Content-Type:").pack(side=tk.LEFT, padx=(0, 4))
+        self.var_content_type = tk.StringVar(value="application/json")
+        for ct, label in [
+            ("none", "None"),
+            ("application/json", "JSON"),
+            ("application/x-www-form-urlencoded", "x-www-form-urlencoded"),
+            ("text/plain", "Raw/Text")
+        ]:
+            ttk.Radiobutton(top_bar, text=label, value=ct, variable=self.var_content_type, command=self._on_content_type_change).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(top_bar, text="✨ JSON 포맷팅", command=self._beautify_json_body).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(top_bar, text="지우기", command=lambda: self.text_req_body.delete("1.0", tk.END)).pack(side=tk.RIGHT, padx=2)
+
+        self.text_req_body = tk.Text(parent, height=5, font=("Consolas", 9))
+        self.text_req_body.pack(fill=tk.BOTH, expand=True)
+
+    def _build_auth_tab(self, parent):
+        top_bar = ttk.Frame(parent)
+        top_bar.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(top_bar, text="인증 방식 (Type):").pack(side=tk.LEFT, padx=(0, 6))
+        self.combo_auth_type = ttk.Combobox(top_bar, values=["No Auth", "Bearer Token", "Basic Auth", "API Key (Header)"], state="readonly", width=18)
+        self.combo_auth_type.set("No Auth")
+        self.combo_auth_type.pack(side=tk.LEFT, padx=4)
+        self.combo_auth_type.bind("<<ComboboxSelected>>", self._on_auth_type_change)
+
+        self.auth_fields_frame = ttk.Frame(parent)
+        self.auth_fields_frame.pack(fill=tk.X, pady=4)
+        self._render_auth_fields()
+
+    def _render_auth_fields(self):
+        for child in self.auth_fields_frame.winfo_children():
+            child.destroy()
+
+        atype = self.combo_auth_type.get()
+        if atype == "Bearer Token":
+            row = ttk.Frame(self.auth_fields_frame)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text="Token:").pack(side=tk.LEFT, padx=4)
+            self.entry_auth_token = ttk.Entry(row, width=60, font=("Consolas", 9))
+            self.entry_auth_token.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        elif atype == "Basic Auth":
+            row1 = ttk.Frame(self.auth_fields_frame)
+            row1.pack(fill=tk.X, pady=2)
+            ttk.Label(row1, text="Username:").pack(side=tk.LEFT, padx=4)
+            self.entry_auth_user = ttk.Entry(row1, width=30)
+            self.entry_auth_user.pack(side=tk.LEFT, padx=4)
+            
+            ttk.Label(row1, text="Password:").pack(side=tk.LEFT, padx=4)
+            self.entry_auth_pass = ttk.Entry(row1, width=30, show="*")
+            self.entry_auth_pass.pack(side=tk.LEFT, padx=4)
+        elif atype == "API Key (Header)":
+            row = ttk.Frame(self.auth_fields_frame)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text="Key Name:").pack(side=tk.LEFT, padx=4)
+            self.entry_auth_key = ttk.Entry(row, width=25)
+            self.entry_auth_key.insert(0, "X-API-KEY")
+            self.entry_auth_key.pack(side=tk.LEFT, padx=4)
+            
+            ttk.Label(row, text="Value:").pack(side=tk.LEFT, padx=4)
+            self.entry_auth_val = ttk.Entry(row, width=40, font=("Consolas", 9))
+            self.entry_auth_val.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        else:
+            ttk.Label(self.auth_fields_frame, text="인증 헤더가 추가되지 않습니다.", foreground="#6b7280").pack(anchor=tk.W, padx=4)
+
+    def _on_auth_type_change(self, event=None):
+        self._render_auth_fields()
+
+    def _on_method_change(self, event=None):
+        m = self.combo_method.get()
+        if m in ("POST", "PUT", "PATCH"):
+            if self.var_content_type.get() == "none":
+                self.var_content_type.set("application/json")
+        elif m in ("GET", "HEAD"):
+            pass
+
+    def _on_content_type_change(self):
+        ct = self.var_content_type.get()
+        if ct == "none":
+            self.text_req_body.config(state=tk.DISABLED)
+        else:
+            self.text_req_body.config(state=tk.NORMAL)
+
+    def _apply_header_preset(self):
+        preset = self.combo_header_preset.get()
+        cur_text = self.text_req_headers.get("1.0", tk.END).strip() or "{}"
+        try:
+            h_dict = json.loads(cur_text)
+            if not isinstance(h_dict, dict):
+                h_dict = {}
+        except Exception:
+            h_dict = {}
+
+        if "JSON" in preset:
+            h_dict["Content-Type"] = "application/json"
+        elif "Form" in preset:
+            h_dict["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+        elif "X-Requested-With" in preset:
+            h_dict["X-Requested-With"] = "XMLHttpRequest"
+        elif "Referer" in preset:
+            url = self.entry_url.get().strip()
+            parsed = urllib.parse.urlparse(url)
+            base = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else url
+            h_dict["Referer"] = base
+        elif "User-Agent" in preset:
+            h_dict["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        elif "Cookie" in preset:
+            if "Cookie" not in h_dict:
+                h_dict["Cookie"] = "session_id=example_token"
+
+        self.text_req_headers.delete("1.0", tk.END)
+        self.text_req_headers.insert("1.0", json.dumps(h_dict, ensure_ascii=False, indent=2))
+
+    def _beautify_json_body(self):
+        raw = self.text_req_body.get("1.0", tk.END).strip()
+        if not raw:
+            return
+        try:
+            parsed = json.loads(raw)
+            self.text_req_body.delete("1.0", tk.END)
+            self.text_req_body.insert("1.0", json.dumps(parsed, ensure_ascii=False, indent=2))
+        except Exception as e:
+            messagebox.showwarning("JSON 파싱 오류", f"유효한 JSON 형식이 아닙니다:\n{e}", parent=self)
+
+    def _sync_params_from_url(self):
+        url = self.entry_url.get().strip()
+        parsed = urllib.parse.urlparse(url)
+        if parsed.query:
+            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            flat = {k: v[0] if len(v) == 1 else v for k, v in params.items()}
+            self.text_params.delete("1.0", tk.END)
+            self.text_params.insert("1.0", json.dumps(flat, ensure_ascii=False, indent=2))
+        else:
+            messagebox.showinfo("알림", "URL에 쿼리 파라미터가 없습니다.", parent=self)
+
+    def _sync_params_to_url(self):
+        raw = self.text_params.get("1.0", tk.END).strip()
+        if not raw:
+            return
+        params_dict = {}
+        if raw.startswith("{"):
+            try:
+                params_dict = json.loads(raw)
+            except Exception:
+                pass
+        else:
+            for line in raw.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    params_dict[k.strip()] = v.strip()
+
+        if params_dict:
+            url = self.entry_url.get().strip()
+            parsed = urllib.parse.urlparse(url)
+            base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}" if parsed.netloc else url
+            qstr = urllib.parse.urlencode(params_dict)
+            self.entry_url.delete(0, tk.END)
+            self.entry_url.insert(0, f"{base}?{qstr}")
+
+    def _load_initial_data(self):
+        d = self.initial_data
+        if not d:
+            return
+        if d.get("method"):
+            self.combo_method.set(d["method"].upper())
+        if d.get("url"):
+            self.entry_url.delete(0, tk.END)
+            self.entry_url.insert(0, d["url"])
+        if d.get("headers"):
+            h = d["headers"]
+            if isinstance(h, dict):
+                h = json.dumps(h, ensure_ascii=False, indent=2)
+            self.text_req_headers.delete("1.0", tk.END)
+            self.text_req_headers.insert("1.0", str(h))
+        if d.get("body"):
+            self.text_req_body.delete("1.0", tk.END)
+            self.text_req_body.insert("1.0", str(d["body"]))
+        if d.get("content_type"):
+            self.var_content_type.set(d["content_type"])
+        self._on_method_change()
+
+    # ----------------- Execution & Response -----------------
+
+    def _send_request(self):
+        if self._is_loading:
+            return
+
+        url = self.entry_url.get().strip()
+        if not url or url == "https://" or url == "http://":
+            messagebox.showwarning("입력 필요", "요청을 전송할 URL을 입력해주세요.", parent=self)
+            return
+
+        method = self.combo_method.get().upper()
+        
+        # Headers
+        headers_str = self.text_req_headers.get("1.0", tk.END).strip()
+        headers_dict = {}
+        if headers_str:
+            try:
+                headers_dict = json.loads(headers_str)
+            except Exception:
+                for line in headers_str.splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        headers_dict[k.strip()] = v.strip()
+
+        # Body
+        ct = self.var_content_type.get()
+        body_content = ""
+        if ct != "none":
+            body_content = self.text_req_body.get("1.0", tk.END).strip()
+
+        # Auth
+        atype = self.combo_auth_type.get()
+        auth_data = {}
+        if atype == "Bearer Token" and hasattr(self, "entry_auth_token"):
+            auth_data["token"] = self.entry_auth_token.get().strip()
+        elif atype == "Basic Auth" and hasattr(self, "entry_auth_user"):
+            auth_data["username"] = self.entry_auth_user.get().strip()
+            auth_data["password"] = self.entry_auth_pass.get().strip()
+        elif atype == "API Key (Header)" and hasattr(self, "entry_auth_key"):
+            auth_data["key"] = self.entry_auth_key.get().strip()
+            auth_data["value"] = self.entry_auth_val.get().strip()
+
+        auth_key_map = {
+            "No Auth": "none",
+            "Bearer Token": "bearer",
+            "Basic Auth": "basic",
+            "API Key (Header)": "apikey"
+        }
+
+        self._is_loading = True
+        self.btn_send.config(state=tk.DISABLED, text="⏳ 전송 중...")
+        self.lbl_status.config(text="서버로 요청 전송 중...", foreground="#2563eb")
+
+        threading.Thread(
+            target=self._worker_send,
+            args=(method, url, headers_dict, body_content, ct if ct != "none" else "", auth_key_map.get(atype, "none"), auth_data),
+            daemon=True
+        ).start()
+
+    def _worker_send(self, method, url, headers_dict, body_content, content_type, auth_type, auth_data):
+        res = crawler.test_http_request(
+            method=method,
+            url=url,
+            headers=headers_dict,
+            body=body_content,
+            content_type=content_type,
+            auth_type=auth_type,
+            auth_data=auth_data,
+            timeout=25
+        )
+        self.after(0, self._render_response, res)
+
+    def _render_response(self, res):
+        self._is_loading = False
+        self.btn_send.config(state=tk.NORMAL, text="⚡ 찔러보기 (Send)")
+        self._current_response = res
+
+        status_code = res.get("status_code", 0)
+        status_reason = res.get("status_reason", "")
+        time_ms = res.get("response_time_ms", 0)
+        size_bytes = res.get("content_bytes_len", 0)
+        size_str = f"{size_bytes} B" if size_bytes < 1024 else f"{size_bytes/1024:.1f} KB"
+
+        # 1. Update Status Badge
+        if 200 <= status_code < 300:
+            color = "#16a34a" # Green
+        elif 300 <= status_code < 400:
+            color = "#2563eb" # Blue
+        elif 400 <= status_code < 500:
+            color = "#d97706" # Orange
+        else:
+            color = "#dc2626" # Red
+
+        status_text = f"Status: {status_code} {status_reason}" if status_code > 0 else f"Error: {res.get('error', 'Failed')}"
+        self.lbl_status.config(text=status_text, foreground=color)
+        self.lbl_time.config(text=f"⏱️ {time_ms} ms")
+        self.lbl_size.config(text=f"📦 {size_str}")
+
+        raw_str = res.get("content_str", "")
+
+        # 2. Pretty Tab
+        self.text_pretty.delete("1.0", tk.END)
+        if raw_str.strip().startswith(('{', '[')):
+            try:
+                parsed_json = json.loads(raw_str)
+                self.text_pretty.insert("1.0", json.dumps(parsed_json, ensure_ascii=False, indent=2))
+            except Exception:
+                self.text_pretty.insert("1.0", res.get("extracted_text") or raw_str)
+        else:
+            self.text_pretty.insert("1.0", res.get("extracted_text") or raw_str)
+
+        # 3. Raw Tab
+        self.text_raw.delete("1.0", tk.END)
+        self.text_raw.insert("1.0", raw_str)
+
+        # 4. HTML Preview Tab
+        self.text_html_preview.delete("1.0", tk.END)
+        preview_header = f"=== [HTML 응답 분석 프리뷰] ===\nURL: {res.get('url')}\n크기: {size_str} | 상태: {status_code}\n\n"
+        self.text_html_preview.insert("1.0", preview_header + (res.get("extracted_text") or raw_str))
+
+        # Save to temp html file for browser opening
+        try:
+            temp_dir = tempfile.gettempdir()
+            self._temp_html_path = os.path.join(temp_dir, "ameva_preview.html")
+            with open(self._temp_html_path, "w", encoding="utf-8", errors="replace") as f:
+                if "<html" not in raw_str.lower():
+                    f.write(f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>AMEVA Preview</title><style>body{{font-family:sans-serif;padding:20px;background:#f8fafc;}}pre{{background:#fff;padding:15px;border-radius:8px;border:1px solid #e2e8f0;}}</style></head><body><h2>AMEVA-Crawler Response Preview</h2><pre>{raw_str}</pre></body></html>")
+                else:
+                    f.write(raw_str)
+        except Exception:
+            self._temp_html_path = None
+
+        # 5. Response Headers Tab
+        for item in self.tree_rheaders.get_children():
+            self.tree_rheaders.delete(item)
+        for h, v in res.get("response_headers", {}).items():
+            self.tree_rheaders.insert("", tk.END, values=(h, v))
+
+        # 6. Links Tab
+        for item in self.tree_links.get_children():
+            self.tree_links.delete(item)
+        for l in res.get("extracted_links", []):
+            self.tree_links.insert("", tk.END, values=(l.get("text", "-"), l.get("href", "-")))
+
+    def _open_in_system_browser(self):
+        if self._temp_html_path and os.path.exists(self._temp_html_path):
+            webbrowser.open(f"file:///{os.path.abspath(self._temp_html_path).replace('\\', '/')}")
+        else:
+            url = self.entry_url.get().strip()
+            if url.startswith("http"):
+                webbrowser.open(url)
+            else:
+                messagebox.showinfo("알림", "렌더링할 HTML 응답이 없습니다.", parent=self)
+
+    def _open_selected_link(self):
+        sel = self.tree_links.selection()
+        if not sel:
+            messagebox.showinfo("선택 필요", "열고자 하는 링크를 목록에서 선택해주세요.", parent=self)
+            return
+        vals = self.tree_links.item(sel[0], "values")
+        if vals and len(vals) >= 2 and vals[1] != "-":
+            webbrowser.open(vals[1])
+
+    def _copy_selected_link(self):
+        sel = self.tree_links.selection()
+        if not sel:
+            return
+        vals = self.tree_links.item(sel[0], "values")
+        if vals and len(vals) >= 2:
+            self.clipboard_clear()
+            self.clipboard_append(vals[1])
+            messagebox.showinfo("복사 완료", f"링크 URL이 클립보드에 복사되었습니다:\n{vals[1]}", parent=self)
+
+    def _copy_response_body(self):
+        if not self._current_response:
+            return
+        raw = self._current_response.get("content_str", "")
+        if raw:
+            self.clipboard_clear()
+            self.clipboard_append(raw)
+            messagebox.showinfo("복사 완료", "응답 내용이 클립보드에 복사되었습니다.", parent=self)
+
+    def _create_schedule_target(self):
+        url = self.entry_url.get().strip()
+        if not url or url == "https://" or url == "http://":
+            messagebox.showwarning("입력 필요", "등록할 대상 URL을 입력해주세요.", parent=self)
+            return
+
+        method = self.combo_method.get().upper()
+        
+        # Headers
+        h_str = self.text_req_headers.get("1.0", tk.END).strip()
+        
+        # Body
+        ct = self.var_content_type.get()
+        body_val = self.text_req_body.get("1.0", tk.END).strip() if ct != "none" else ""
+
+        # Default Name extraction
+        parsed = urllib.parse.urlparse(url)
+        target_name = parsed.netloc or "새로운 타겟"
+
+        target_data = {
+            "name": target_name,
+            "url": url,
+            "method": method,
+            "headers": h_str,
+            "body": body_val,
+            "content_type": ct if ct != "none" else "application/json",
+            "interval_type": "daily" if "json" in url else "interval",
+            "interval_value": "09:00" if "json" in url else "300",
+            "detect_mode": "all"
+        }
+
+        if self.on_create_target:
+            self.on_create_target(target_data)
         self.destroy()

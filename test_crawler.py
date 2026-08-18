@@ -157,5 +157,36 @@ class TestAMEVACrawler(unittest.TestCase):
         }
         self.assertTrue(scheduler._should_run_target(target_due, now))
 
+    def test_parse_content_and_links_json(self):
+        """Test intelligent JSON response parsing."""
+        from crawler import parse_content_and_links
+        json_sample = json.dumps({
+            "list": [
+                {
+                    "jobnoticeName": "AI/Cloud Engineer",
+                    "jobnoticeSn": 1001,
+                    "recruitClassName": "Tech",
+                    "receiptState": "접수중"
+                }
+            ]
+        })
+        text, links = parse_content_and_links(json_sample, base_url="https://ktds.recruiter.co.kr/app/jobnotice/list.json")
+        self.assertIn("AI/Cloud Engineer", text)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["text"], "AI/Cloud Engineer")
+        self.assertIn("jobnoticeSn=1001", links[0]["href"])
+
+    def test_http_tester_engine(self):
+        """Test HTTP request tester with mock and live options."""
+        from crawler import test_http_request
+        # Test with mock/known URL
+        res = test_http_request("GET", "https://httpbin.org/get", params={"test": "123"}, timeout=5)
+        # Verify structure
+        self.assertIn("status_code", res)
+        self.assertIn("response_time_ms", res)
+        self.assertIn("response_headers", res)
+        self.assertIn("extracted_text", res)
+        self.assertIn("extracted_links", res)
+
 if __name__ == "__main__":
     unittest.main()

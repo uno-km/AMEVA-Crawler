@@ -209,6 +209,198 @@ def fetch_url(target):
         }
 
 
+def test_http_request(method="GET", url="", params=None, headers=None, body="", content_type="application/json", auth_type="none", auth_data=None, timeout=20):
+    """
+    Perform on-demand HTTP request testing (Postman mode).
+    Returns full response metadata: status, time, size, headers, raw text, pretty text, extracted links, error.
+    """
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    method = (method or "GET").upper()
+
+    # Merge query params into URL if provided
+    if params:
+        if isinstance(params, dict):
+            query_str = urllib.parse.urlencode([(k, v) for k, v in params.items() if str(k).strip()])
+        elif isinstance(params, list):
+            query_str = urllib.parse.urlencode([(k, v) for k, v in params if str(k).strip()])
+        elif isinstance(params, str) and params.strip():
+            query_str = params.strip().lstrip("?")
+        else:
+            query_str = ""
+
+        if query_str:
+            delimiter = "&" if "?" in url else "?"
+            url = f"{url}{delimiter}{query_str}"
+
+    # Base headers
+    req_headers = {
+        "User-Agent": db.get_setting("global_user_agent") or DEFAULT_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
+    # Custom headers
+    if headers:
+        if isinstance(headers, dict):
+            for k, v in headers.items():
+                if str(k).strip():
+                    req_headers[str(k).strip()] = str(v)
+        elif isinstance(headers, list):
+            for item in headers:
+                if isinstance(item, (list, tuple)) and len(item) >= 2 and str(item[0]).strip():
+                    req_headers[str(item[0]).strip()] = str(item[1])
+        elif isinstance(headers, str) and headers.strip():
+            try:
+                parsed_h = json.loads(headers)
+                if isinstance(parsed_h, dict):
+                    req_headers.update({str(k): str(v) for k, v in parsed_h.items()})
+            except Exception:
+                pass
+
+    # Authentication
+    auth_type = (auth_type or "none").lower()
+    auth_data = auth_data or {}
+    if auth_type == "bearer" and auth_data.get("token"):
+        req_headers["Authorization"] = f"Bearer {auth_data['token'].strip()}"
+    elif auth_type == "basic" and (auth_data.get("username") or auth_data.get("password")):
+        import base64
+        user_pass = f"{auth_data.get('username', '')}:{auth_data.get('password', '')}"
+        b64_val = base64.b64encode(user_pass.encode('utf-8')).decode('ascii')
+        req_headers["Authorization"] = f"Basic {b64_val}"
+    elif auth_type == "apikey" and auth_data.get("key") and auth_data.get("value"):
+        req_headers[auth_data["key"].strip()] = auth_data["value"].strip()
+
+    # Request Body
+    data_bytes = None
+    if method in ("POST", "PUT", "PATCH", "DELETE"):
+        if content_type:
+            req_headers["Content-Type"] = content_type
+        if body:
+            if isinstance(body, str):
+                data_bytes = body.encode('utf-8')
+            elif isinstance(body, (dict, list)):
+                if "json" in content_type:
+                    data_bytes = json.dumps(body, ensure_ascii=False).encode('utf-8')
+                else:
+                    data_bytes = urllib.parse.urlencode(body).encode('utf-8')
+
+    # SSL Context
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    start_time = time.time()
+    try:
+        req = urllib.request.Request(url, data=data_bytes, headers=req_headers, method=method)
+        req_timeout = float(timeout) if timeout else float(DEFAULT_TIMEOUT_SEC)
+
+        with urllib.request.urlopen(req, timeout=req_timeout, context=ssl_context) as response:
+            status_code = response.status
+            status_reason = getattr(response, "reason", "OK")
+            content_bytes = response.read()
+            elapsed_ms = int((time.time() - start_time) * 1000)
+
+            # Detect charset
+            charset = response.headers.get_content_charset() or "utf-8"
+            try:
+                content_str = content_bytes.decode(charset)
+            except (UnicodeDecodeError, LookupError):
+                try:
+                    content_str = content_bytes.decode("utf-8", errors="replace")
+                except Exception:
+                    content_str = content_bytes.decode("cp949", errors="replace")
+
+            # Parse text and links
+            extracted_text, extracted_links = parse_content_and_links(content_str, base_url=url)
+
+            # Response headers
+            resp_headers = {k: v for k, v in response.headers.items()}
+
+            return {
+                "success": True,
+                "url": url,
+                "method": method,
+                "status_code": status_code,
+                "status_reason": status_reason,
+                "response_time_ms": elapsed_ms,
+                "content_bytes_len": len(content_bytes),
+                "content_str": content_str,
+                "response_headers": resp_headers,
+                "extracted_text": extracted_text,
+                "extracted_links": extracted_links,
+                "error": None
+            }
+
+    except urllib.error.HTTPError as e:
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        err_bytes = b""
+        try:
+            err_bytes = e.read()
+        except Exception:
+            pass
+
+        charset = e.headers.get_content_charset() or "utf-8"
+        try:
+            err_str = err_bytes.decode(charset)
+        except Exception:
+            err_str = err_bytes.decode("utf-8", errors="replace")
+
+        extracted_text, extracted_links = parse_content_and_links(err_str, base_url=url)
+        resp_headers = {k: v for k, v in e.headers.items()} if e.headers else {}
+
+        return {
+            "success": False,
+            "url": url,
+            "method": method,
+            "status_code": e.code,
+            "status_reason": getattr(e, "reason", "HTTP Error"),
+            "response_time_ms": elapsed_ms,
+            "content_bytes_len": len(err_bytes),
+            "content_str": err_str,
+            "response_headers": resp_headers,
+            "extracted_text": extracted_text,
+            "extracted_links": extracted_links,
+            "error": f"HTTP Error {e.code}: {e.reason}"
+        }
+
+    except urllib.error.URLError as e:
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        return {
+            "success": False,
+            "url": url,
+            "method": method,
+            "status_code": 0,
+            "status_reason": "Connection Error",
+            "response_time_ms": elapsed_ms,
+            "content_bytes_len": 0,
+            "content_str": "",
+            "response_headers": {},
+            "extracted_text": "",
+            "extracted_links": [],
+            "error": f"URL Connection Error: {e.reason}"
+        }
+
+    except Exception as e:
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        return {
+            "success": False,
+            "url": url,
+            "method": method,
+            "status_code": 0,
+            "status_reason": "Unexpected Exception",
+            "response_time_ms": elapsed_ms,
+            "content_bytes_len": 0,
+            "content_str": "",
+            "response_headers": {},
+            "extracted_text": "",
+            "extracted_links": [],
+            "error": f"Unexpected Exception: {str(e)}"
+        }
+
+
 def analyze_diff(old_text, new_text, old_links, new_links):
     """
     Compare previous crawl state with current crawl state.
