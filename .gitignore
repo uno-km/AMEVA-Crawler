@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Database and local data (Sensitive & Runtime)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment and secrets
+.env
+config.local.py
+secrets.json
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+# Logs & Scratch
+scratch/
+*.log
